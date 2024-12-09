@@ -8,7 +8,8 @@ from utils import (
     cross_attn_init,
     init_pipeline,
     save_attention_maps,
-    GmPLoRALoader
+    GmPLoRALoader,
+    check_lora_parameters
 )
 
 shoe_anatomy_sections = [
@@ -41,6 +42,15 @@ shoe_anatomy_sections = [section.lower() for section in shoe_anatomy_sections]
 cross_attn_init()
 #####################################
 
+
+# check_gmp_parameters(
+#     gmp_path="./shoes-flux-dreambooth-lora-TE-GmP/checkpoint-4800/gmp_parameters.pt"
+# )
+
+# check_lora_parameters(
+#     lora_path="./shoes-flux-dreambooth-lora-TE-GmP/checkpoint-6000/pytorch_lora_weights.safetensors"
+# )
+
 # First load base components
 pipe = FluxPipeline.from_pretrained( 
     "black-forest-labs/FLUX.1-dev", 
@@ -48,8 +58,7 @@ pipe = FluxPipeline.from_pretrained(
 )
 
 # Move everything to same device/dtype before LoRA
-pipe = pipe.to(torch.float32)
-# pipe = pipe.to("cpu")
+pipe = pipe.to("cuda", torch.float32)
 
 
 # Load LoRA weights after moving to device
@@ -60,12 +69,12 @@ pipe = pipe.to(torch.float32)
 # Load LoRA weights and apply GmP transformation
 loader = GmPLoRALoader(pipe)
 pipe = loader.load_lora_with_gmp(
-    lora_path="./shoes-flux-dreambooth-lora-TE-GmP/checkpoint-7200",
-    gmp_path="./shoes-flux-dreambooth-lora-TE-GmP/checkpoint-7200/gmp_params.pt"
+    lora_path="./shoes-flux-dreambooth-lora-TE-GmP/checkpoint-7200/pytorch_lora_weights.safetensors",
+    scale=0.3
 )
 
 # Enable optimizations after everything is loaded
-# pipe.to("cuda")
+pipe.to("cuda")
 # pipe.enable_sequential_cpu_offload()
 # pipe.vae.enable_slicing()
 # pipe.vae.enable_tiling()
@@ -76,11 +85,12 @@ pipe = init_pipeline(pipe)
 # TE - p1 - [1090, 666, 977]
 # TE - p2 - [333, 666, 1023]
 # Base - p2 - [333, 666, ]
-# GmP - p1 - [333, 666, 444, 555, 111, 1090, 977]
-for seed in [666, 444, 555, 111, 1090, 977]:
+# GmP - p1 - [1090, 977, 555, 444, 111]
+# GmP - p2 - [1090, 333, 777, 111,222,444,555,666, 888,999, 1000]
+for seed in [1090, 333, 777, 111,222,444,555,666, 888,999, 1000]:
     prompts = [
-        "A side view of athletic shoes. The blue mesh upper with the black tongue and vamp, while the white midsole and black outsole.",
-        # "lifestyle shoes; beige mesh upper; beige mesh tongue; black synthetic heel counter; white and grey EVA midsole; black rubber outsole"
+        # "A side view of athletic shoes. The blue mesh upper with the black tongue and vamp, while the white midsole and black outsole.",
+        "lifestyle shoes; beige mesh upper; beige mesh tongue; black synthetic heel counter; white and grey EVA midsole; black rubber outsole"
     ]
 
     for batch, prompt in enumerate(prompts):

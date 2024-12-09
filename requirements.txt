@@ -6,3 +6,5 @@ protobuf
 einops
 torchvision
 matplotlib
+safetensors
+peft

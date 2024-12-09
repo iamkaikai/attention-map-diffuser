@@ -5,6 +5,8 @@ from torchvision.transforms import ToPILImage
 import numpy as np
 import torch.nn as nn
 import types
+from safetensors.torch import load_file
+
 
 
 from diffusers.models import Transformer2DModel
@@ -371,49 +373,92 @@ class GmPLayer(nn.Module):
 class GmPLoRALoader:
     def __init__(self, pipe):
         self.pipe = pipe
+
+    def load_lora_with_gmp(self, lora_path, scale=1.0):
+        print(f"Loading LoRA weights from {lora_path} with scale {scale}")
         
-    def load_lora_with_gmp(self, lora_path, gmp_path=None):
-        
-        print(f"Loading LoRA weights from {lora_path}")
-        self.pipe.load_lora_weights(lora_path)
-        
-        print("Applying GmP to LoRA layers...")
-        for name, module in self.pipe.text_encoder.named_modules():
-            if "lora_" in name and isinstance(module, nn.Linear):
-                if "lora_A" in name or "lora_B" in name:
-                    # Create GmP layer
-                    gmp = GmPLayer(module.weight, bias=module.bias)
-                    
-                    # Replace forward method
-                    def new_forward(self, x, gmp_layer=gmp):
-                        return gmp_layer(x)
-                    module.forward = types.MethodType(new_forward, module)
-                    
-                    # Store GmP parameters
-                    module.gmp_theta = gmp.theta
-                    module.gmp_r = gmp.r
-                    module.gmp_bias = gmp.bias
-                    
-                    # Disable original LoRA gradients
-                    module.weight.requires_grad_(False)
-                    print(f"Applied GmP to {name}")
-        
-        # 3. Load GmP parameters if provided
-        if gmp_path is None:
-            gmp_path = os.path.join(lora_path, "gmp_parameters.pt")
-        
-        if os.path.exists(gmp_path):
-            print(f"Loading GmP parameters from {gmp_path}")
-            gmp_state = torch.load(gmp_path)
-            for name, module in self.pipe.text_encoder.named_modules():
-                if hasattr(module, 'gmp_theta'):
-                    key = f"{name}.gmp"
-                    if key in gmp_state:
-                        module.gmp_theta.data = gmp_state[key]['theta']
-                        module.gmp_r.data = gmp_state[key]['r']
-                        module.gmp_bias.data = gmp_state[key]['bias']
-                        print(f"Loaded GmP parameters for {name}")
+        # Load the LoRA state dict
+        if lora_path.endswith('.safetensors'):
+            lora_state = load_file(lora_path)
         else:
-            print(f"No GmP parameters found at {gmp_path}")
+            lora_state = torch.load(lora_path)
         
+        # First, load the regular LoRA weights with scale
+        self.pipe.load_lora_weights(lora_path, weight_name=None, adapter_name=None)
+
+        print("Applying GmP to LoRA layers...")
+        
+        # Find all GmP parameters in lora_state
+        gmp_keys = [k for k in lora_state.keys() if 'gmp' in k]
+        print(f"Found {len(gmp_keys)} GmP parameters")
+        
+        # Get the device from the text encoder
+        device = next(self.pipe.text_encoder.parameters()).device
+        print(f"Using device: {device}")
+        
+        # Group GmP parameters by their LoRA module
+        gmp_params = {}
+        for key in gmp_keys:
+            base_path = key.rsplit('.', 1)[0]
+            if base_path not in gmp_params:
+                gmp_params[base_path] = {}
+            param_type = key.split('.')[-1]
+            # Move tensor to the correct device and apply scale to the parameters
+            tensor = lora_state[key].to(device)
+            if param_type in ['gmp_theta', 'gmp_r', 'gmp_bias']:  # Apply scale to transformation parameters
+                tensor = tensor * scale
+            gmp_params[base_path][param_type] = tensor
+        
+        # Now apply GmP parameters to corresponding LoRA modules
+        for base_path, params in gmp_params.items():
+            module_path = base_path.replace('text_encoder.', '')
+            
+            module = None
+            for name, m in self.pipe.text_encoder.named_modules():
+                if name == module_path:
+                    module = m
+                    break
+            
+            if module is not None:
+                print(f"Found module for {base_path}: {type(module)}")
+                
+                if isinstance(module, nn.ModuleDict):
+                    if 'default_0' in module:
+                        linear_module = module['default_0']
+                        print(f"Accessing Linear layer: {type(linear_module)}")
+                        
+                        # Create GmP layer with loaded parameters and move to correct device
+                        gmp = GmPLayer(linear_module.weight, bias=linear_module.bias)
+                        gmp = gmp.to(device)  # Move GmP layer to correct device
+                        
+                        # Ensure parameters are on the correct device
+                        gmp.theta.data = params['gmp_theta'].to(device)
+                        gmp.r.data = params['gmp_r'].to(device)
+                        gmp.bias.data = params['gmp_bias'].to(device)
+                        
+                        def new_forward(self, x, gmp_layer=gmp):
+                            # Ensure input is on the correct device
+                            x = x.to(gmp_layer.theta.device)
+                            return gmp_layer(x)
+                        
+                        linear_module.forward = types.MethodType(new_forward, linear_module)
+                        print(f"Applied GmP to {base_path}")
+                    else:
+                        print(f"Warning: Could not find Linear layer in ModuleDict for {base_path}")
+                else:
+                    print(f"Warning: Expected ModuleDict but got {type(module)} for {base_path}")
+        
+        print("GmP applied to all relevant LoRA layers")
         return self.pipe
+
+def check_lora_parameters(lora_path):
+    print(f"Loading lora_parameters from {lora_path}")
+    print(f"File exists: {os.path.exists(lora_path)}")
+    print(f"File size: {os.path.getsize(lora_path)} bytes")
+    # check all attr in lora file
+    lora_state = load_file(lora_path)
+    for key in lora_state.keys():
+        if "gmp" in key:
+            print(f"key: {key}")
+            print(lora_state[key][:5])
+            break
