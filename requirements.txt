@@ -8,3 +8,4 @@ torchvision
 matplotlib
 safetensors
 peft
+controlnet_aux
